@@ -24,7 +24,7 @@ custom VPC with auto-scaling web servers behind a load balancer.
 
 ## Architecture
 
-> *(Insert architecture diagram here — use AWS icons, add name watermark)*
+![AWS Architecture Diagram](docs/aws-architecture.drawio)
 
 ---
 
