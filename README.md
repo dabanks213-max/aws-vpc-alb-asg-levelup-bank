@@ -256,7 +256,7 @@ echo "<h1>Level-Up Bank | Instance: $(hostname -f)</h1>" > /var/www/html/index.h
 >   Manually registering targets would conflict with ASG management
 
 > **Cost Note:** ALBs are not free tier eligible. In a real AWS account an ALB
-> costs approximately $16–$18/month at minimum plus $0.008 per LCU hour.
+> costs at least $16/month at minimum plus Load Balancer Capacity Units (LCUs) costs.
 > Always delete the ALB when the lab is complete.
 
 ---
@@ -428,7 +428,7 @@ aws ec2 delete-vpc --vpc-id vpc-0772da34b1b80bce3
 ```
 
 > **Engineer's Note:** Always clean up cloud resources after learning projects.
-> The ALB alone costs ~$16–$18/month at minimum. Leaving idle resources running
+> The ALB alone costs ~$16/month at minimum. Leaving idle resources running
 > is a common source of unexpected AWS bills and is poor cloud hygiene.
 
 ---
