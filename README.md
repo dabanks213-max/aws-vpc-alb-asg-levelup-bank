@@ -369,8 +369,105 @@ need to be deleted.
 
 ## Advanced Tier — CPU Scaling Policy + Stress Test
 
-> *Coming next — Adding a Target Tracking Scaling Policy at 50% CPU and
-> stress testing with the `stress` tool to trigger scale-out.*
+### Step 1: Add CPU Target Tracking Scaling Policy
+
+Navigate to **EC2 → Auto Scaling Groups → `levelup-bank-asg` → Automatic scaling tab → Create dynamic scaling policy**
+
+| Setting | Value | Reason |
+|---|---|---|
+| Policy type | Target tracking scaling | AWS manages instance count automatically to maintain the target |
+| Policy name | `levelup-cpu-scaling-policy` | Identifiable in CloudWatch alarms |
+| Metric type | Average CPU utilization | Measures CPU across all instances in the group |
+| Target value | `50` | Scale out when average CPU exceeds 50% |
+| Instance warmup | 150 seconds | Excludes new instances from the average during boot |
+
+> **Two most important settings:**
+> - **Target tracking at 50%** — the ASG continuously monitors average CPU
+>   across all running instances. When the average breaches 50%, CloudWatch
+>   fires an alarm and the ASG adds instances. When CPU drops well below 50%
+>   for a sustained period, it removes instances down to the minimum
+> - **Instance warmup** — prevents a newly launching instance's high startup
+>   CPU from being counted in the average. Without this, each scale-out event
+>   could immediately trigger another one, creating a runaway launch loop
+
+> **Cost Note:** Target tracking automatically creates two CloudWatch alarms
+> — one for scale-out and one for scale-in. Do not delete these manually.
+> CloudWatch alarms are free for the first 10 per account under the free tier.
+
+---
+
+### Step 2: Stress Test — Trigger Scale-Out
+
+To verify the policy works, CPU must be pushed above 50% on all running
+instances simultaneously. The scaling policy watches **average CPU across
+all instances** — stressing only one instance while the other is idle
+produces a 50% average, which sits at the threshold but does not breach it.
+
+**Connection method:** EC2 Instance Connect (temporary SSH access)
+
+Temporary inbound rule added to `levelup-webserver-sg`:
+
+| Port | Protocol | Source | Duration |
+|---|---|---|---|
+| 22 | TCP | `0.0.0.0/0` | Lab test only — removed immediately after |
+
+> **Security Note:** Opening port 22 to `0.0.0.0/0` exposes every running
+> and future instance to automated SSH brute-force bots that continuously
+> scan AWS IP ranges. This rule was added solely for lab verification and
+> removed immediately after the stress test completed. In production, SSH
+> access would be restricted to a specific corporate CIDR range or handled
+> via AWS Systems Manager Session Manager with no port 22 required at all.
+> Every new instance the ASG launches inherits security group rules — an
+> open port 22 compounds with every scale-out event.
+
+**Install stress tool (run on both instances):**
+
+```bash
+sudo yum install stress -y
+```
+
+**Run stress simultaneously on both instances:**
+
+```bash
+stress --cpu 2 --timeout 300
+```
+
+> **Two most important flags:**
+> - **`--cpu 2`** — spawns 2 worker processes each pegging a CPU core at
+>   100%. On a t2.micro with 1 vCPU this drives utilization well above 50%
+>   on that instance. Both instances must be stressed at the same time so
+>   the group average exceeds the 50% threshold
+> - **`--timeout 300`** — runs for 300 seconds, giving CloudWatch enough
+>   time to collect multiple data points confirming a sustained breach before
+>   firing the alarm and triggering the policy
+
+---
+
+### Step 3: Verify Scale-Out
+
+CloudWatch detected sustained average CPU above 50% across both instances
+and fired alarm `TargetTracking-levelup-bank-asg-AlarmHigh`.
+
+**Activity log result:**
+
+> *"At 2026-04-25T15:04:31Z a monitor alarm
+> TargetTracking-levelup-bank-asg-AlarmHigh triggered policy
+> levelup-cpu-scaling-policy changing the desired capacity from 2 to 3."*
+
+**Instance count before and after:**
+
+| Phase | Instance Count | AZs in Use |
+|---|---|---|
+| Before stress test | 2 | us-east-1a, us-east-1c |
+| After scale-out | 3 | us-east-1a, us-east-1b, us-east-1c |
+
+New instance `i-011dd87eebe514bd0` launched in **us-east-1b** — the ASG
+automatically balanced across all three availability zones.
+
+**Port 22 removed immediately after test:**
+
+Inbound rules restored to HTTP port 80 from `levelup-alb-sg` only.
+Verified via Security Groups console before proceeding.
 
 ---
 
