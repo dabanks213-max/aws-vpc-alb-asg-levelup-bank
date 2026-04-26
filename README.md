@@ -744,4 +744,4 @@ aws ec2 delete-vpc --vpc-id vpc-0772da34b1b80bce3
 - [x] Complex: Add Amazon EFS and mount on all ASG instances via user data
 - [x] Complex: Verify shared file system by uploading a file on one instance
       and viewing it from another
-- [ ] Repeat full implementation using AWS CLI
+- [ ] Repeat full implementation using IaC
