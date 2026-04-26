@@ -473,9 +473,180 @@ Verified via Security Groups console before proceeding.
 
 ## Complex Tier — EFS Shared File System
 
-> *Coming next — Adding Amazon EFS so all ASG instances share a common
-> file system. Files uploaded to one instance are visible on all others
-> automatically.*
+Each EC2 instance in the ASG has its own local storage by default. Files
+uploaded to one instance are invisible to others — and new instances launched
+by the ASG start completely empty. For a bank serving files and images, this
+means users get inconsistent content depending on which instance the ALB routes
+them to.
+
+Amazon EFS (Elastic File System) solves this with a shared network file system
+that all instances mount simultaneously. Write a file once — every instance
+sees it instantly, including new ones the ASG spins up automatically.
+
+### Tools Added
+
+- Amazon EFS (Elastic File System)
+- `amazon-efs-utils` package
+- NFS protocol (port 2049)
+- `/etc/fstab` for persistent mounts
+
+---
+
+### Step 1: Create EFS Security Group
+
+| Setting | Value |
+|---|---|
+| Name | `levelup-efs-sg` |
+| Description | `Allow NFS from web server instances` |
+| VPC | `levelup-bank-vpc` |
+
+Inbound rule:
+
+| Port | Protocol | Source | Purpose |
+|---|---|---|---|
+| 2049 | TCP | `levelup-webserver-sg` | Allow NFS only from web server instances |
+
+> **Security Note:** Port 2049 is the NFS protocol port used by EFS. Sourcing
+> it from `levelup-webserver-sg` instead of `0.0.0.0/0` means only your web
+> server instances can mount this file system. Opening NFS to the public
+> internet would allow anyone to attempt to access your file system directly —
+> NFS has no authentication beyond network-level access controls.
+
+---
+
+### Step 2: Create EFS File System
+
+Navigate to **EFS → Create file system → Customize**
+
+**File system settings:**
+
+| Setting | Value | Reason |
+|---|---|---|
+| Name | `levelup-bank-efs` | Identifiable across project resources |
+| Storage class | Standard | Multi-AZ redundancy |
+| Automatic backups | Disabled | Not required for a lab environment |
+| Encryption | Enabled (default) | Data encrypted at rest |
+
+**Network access — Mount targets (one per AZ):**
+
+| AZ | Subnet | Security Group |
+|---|---|---|
+| us-east-1a | `levelup-public-1a` | `levelup-efs-sg` |
+| us-east-1b | `levelup-public-1b` | `levelup-efs-sg` |
+| us-east-1c | `levelup-public-1c` | `levelup-efs-sg` |
+
+| Resource | Value |
+|---|---|
+| File system ID | `fs-0132e76e01204ad0a` |
+| DNS name | `fs-0132e76e01204ad0a.efs.us-east-1.amazonaws.com` |
+| State | Available |
+
+> **Cost Note:** EFS Standard costs $0.30/GB/month in us-east-1. It is not
+> free tier eligible. Delete the file system and mount targets when the lab
+> is complete to avoid ongoing charges.
+
+---
+
+### Step 3: Update Launch Template — Version 2
+
+Created a new version of `levelup-webserver-lt` with an updated user data
+script that installs `amazon-efs-utils` and mounts EFS automatically on boot.
+
+```bash
+#!/bin/bash
+yum update -y
+yum install -y httpd amazon-efs-utils
+systemctl start httpd
+systemctl enable httpd
+
+# Mount EFS
+mkdir -p /var/www/html/efs
+mount -t efs -o tls fs-0132e76e01204ad0a:/ /var/www/html/efs
+echo "fs-0132e76e01204ad0a:/ /var/www/html/efs efs defaults,_netdev 0 0" >> /etc/fstab
+
+echo "<h1>Level-Up Bank | Instance: $(hostname -f)</h1>" > /var/www/html/index.html
+```
+
+> **Two most important lines:**
+> - **`mount -t efs -o tls`** — mounts EFS using NFS with TLS encryption
+>   in transit. The `-o tls` flag ensures data moving between the instance
+>   and EFS is encrypted on the wire, not just at rest
+> - **`echo ... >> /etc/fstab`** — writes the mount permanently into the
+>   filesystem table. Without this, the EFS mount survives the current boot
+>   only. `/etc/fstab` is what Linux reads on every boot to know what to
+>   mount automatically — new ASG instances will mount EFS without any
+>   manual intervention
+
+Updated the ASG to use `$Latest` version so all future instances automatically
+use this template.
+
+---
+
+### Step 4: Enable DNS Hostnames on VPC
+
+EFS uses a DNS name to locate its mount targets. Custom VPCs have DNS hostnames
+disabled by default — this caused the initial mount to fail silently.
+
+**VPC → `levelup-bank-vpc` → Actions → Edit VPC settings → Enable DNS hostnames → Save**
+
+> **Key lesson:** Two separate DNS settings exist on a VPC — DNS Resolution
+> and DNS Hostnames. DNS Resolution allows instances to query DNS servers.
+> DNS Hostnames allows AWS service endpoints (like EFS) to be resolved by
+> name inside the VPC. Both must be enabled for EFS DNS-based mounting to
+> work. Custom VPCs have DNS Hostnames off by default. Without it, the
+> mount command fails and new ASG instances boot without EFS silently —
+> causing data inconsistency with no obvious error.
+
+---
+
+### Step 5: Instance Refresh
+
+Triggered a rolling instance refresh on `levelup-bank-asg` to replace existing
+instances with new ones running version 2 of the launch template.
+
+| Setting | Value |
+|---|---|
+| Strategy | Rolling |
+| Minimum healthy percentage | 50% |
+| Instance warmup | 150 seconds |
+
+New instances booted with DNS hostnames enabled and EFS mounted automatically
+via `/etc/fstab` on first boot — no manual mounting required.
+
+---
+
+### Step 6: Verify Shared File System
+
+Connected to both instances via EC2 Instance Connect (temporary SSH — port 22
+removed immediately after verification).
+
+**Confirmed EFS mounted on both instances:**
+
+```bash
+df -h | grep efs
+# Output: 127.0.0.1:/ 8.0E 0 8.0E 0% /var/www/html/efs
+```
+
+> The `127.0.0.1` source and `8.0E` (8 Exabyte) size are normal for EFS.
+> EFS-utils routes traffic through a local stunnel process for TLS, so it
+> appears as localhost. EFS reports a virtually unlimited size by design.
+
+**Wrote a file on Instance 1 (`ip-10-10-3-130` — us-east-1c):**
+
+```bash
+echo "Hello from instance 1 - EFS is working!" | sudo tee /var/www/html/efs/testfile.txt
+```
+
+**Read the file on Instance 2 (`ip-10-10-2-10` — us-east-1b):**
+
+```bash
+cat /var/www/html/efs/testfile.txt
+# Output: Hello from instance 1 - EFS is working!
+```
+
+File written on one instance in us-east-1c was immediately visible on a
+separate instance in us-east-1b — confirming the shared file system is
+working correctly across availability zones.
 
 ---
 
@@ -568,10 +739,9 @@ aws ec2 delete-vpc --vpc-id vpc-0772da34b1b80bce3
 
 ## Next Iterations
 
-- [ ] Add HTTPS listener with ACM certificate on the ALB
-- [ ] Advanced: Add CPU Target Tracking Scaling Policy at 50% threshold
-- [ ] Advanced: Stress test with `stress` tool and observe scale-out
-- [ ] Complex: Add Amazon EFS and mount on all ASG instances via user data
-- [ ] Complex: Verify shared file system by uploading a file on one instance
+- [x] Advanced: Add CPU Target Tracking Scaling Policy at 50% threshold
+- [x] Advanced: Stress test with `stress` tool and observe scale-out
+- [x] Complex: Add Amazon EFS and mount on all ASG instances via user data
+- [x] Complex: Verify shared file system by uploading a file on one instance
       and viewing it from another
 - [ ] Repeat full implementation using AWS CLI
